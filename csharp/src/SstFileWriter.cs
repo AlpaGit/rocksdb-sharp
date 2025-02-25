@@ -10,15 +10,15 @@ namespace RocksDbSharp
     {
         public IntPtr Handle { get; protected set; }
 
-        internal dynamic References { get; } = new ExpandoObject();
+        internal Dictionary<string, object> References { get; } = new Dictionary<string, object>();
 
         public SstFileWriter(EnvOptions envOptions = null, ColumnFamilyOptions ioOptions = null)
         {
             if (envOptions == null)
                 envOptions = new EnvOptions();
             var opts = ioOptions ?? new ColumnFamilyOptions();
-            References.EnvOptions = envOptions;
-            References.IoOptions = ioOptions;
+            References["EnvOptions"] = envOptions;
+            References["IoOptions"] = ioOptions;
             Handle = Native.Instance.rocksdb_sstfilewriter_create(envOptions.Handle, opts.Handle);
         }
 

@@ -20,15 +20,15 @@ namespace RocksDbSharp
         private Dictionary<string, ColumnFamilyHandleInternal> columnFamilies;
 
         // Managed references to unmanaged resources that need to live at least as long as the db
-        internal dynamic References { get; } = new ExpandoObject();
+        internal Dictionary<string, object> References { get; } = new Dictionary<string, object>();
 
         public IntPtr Handle { get; internal set; }
 
-        private RocksDb(IntPtr handle, dynamic optionsReferences, dynamic cfOptionsRefs, Dictionary<string, ColumnFamilyHandleInternal> columnFamilies = null)
+        private RocksDb(IntPtr handle, object optionsReferences, object cfOptionsRefs, Dictionary<string, ColumnFamilyHandleInternal> columnFamilies = null)
         {
             this.Handle = handle;
-            References.Options = optionsReferences;
-            References.CfOptions = cfOptionsRefs;
+            References["Options"] = optionsReferences;
+            References["CfOptions"] = cfOptionsRefs;
             this.columnFamilies = columnFamilies;
         }
 

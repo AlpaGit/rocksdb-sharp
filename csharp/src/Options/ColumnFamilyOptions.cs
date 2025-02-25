@@ -55,7 +55,7 @@ namespace RocksDbSharp
 
         public T SetBlockBasedTableFactory(BlockBasedTableOptions table_options)
         {
-            References.BlockBasedTableFactory = table_options;
+            References["BlockBasedTableFactory"] = table_options;
             // Args: table_options
             Native.Instance.rocksdb_options_set_block_based_table_factory(Handle, table_options.Handle);
             return (T)this;
@@ -518,7 +518,7 @@ namespace RocksDbSharp
         /// </summary>
         public T SetPrefixExtractor(SliceTransform sliceTransform)
         {
-            References.PrefixExtractor = sliceTransform;
+            References["PrefixExtractor"] = sliceTransform;
             Native.Instance.rocksdb_options_set_prefix_extractor(Handle, sliceTransform.Handle);
             return (T)this;
         }
