@@ -1,5 +1,5 @@
 ﻿using System;
-using System.Dynamic;
+using System.Collections.Generic;
 
 namespace RocksDbSharp
 {
@@ -11,7 +11,7 @@ namespace RocksDbSharp
         // and not copied (or reference things that are used in-place).  The idea is to have managed references
         // track the behavior of the unmanaged reference as much as possible.  This prevents access violations
         // when the garbage collector cleans up the last managed reference
-        internal dynamic References { get; } = new ExpandoObject();
+        internal Dictionary<string, object> References { get; } = new Dictionary<string, object>();
 
         public BlockBasedTableOptions()
         {
@@ -56,7 +56,7 @@ namespace RocksDbSharp
         public BlockBasedTableOptions SetFilterPolicy(BloomFilterPolicy filterPolicy)
         {
             // store a managed reference to prevent garbage collection
-            References.FilterPolicy = filterPolicy;
+            References["FilterPolicy"] = filterPolicy;
             Native.Instance.rocksdb_block_based_options_set_filter_policy(Handle, filterPolicy.Handle);
             return this;
         }
@@ -75,7 +75,7 @@ namespace RocksDbSharp
 
         public BlockBasedTableOptions SetBlockCache(Cache blockCache)
         {
-            References.BlockCache = blockCache;
+            References["BlockCache"] = blockCache;
             Native.Instance.rocksdb_block_based_options_set_block_cache(Handle, blockCache.Handle);
             return this;
         }

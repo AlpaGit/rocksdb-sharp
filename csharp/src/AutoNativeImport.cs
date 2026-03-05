@@ -6,11 +6,9 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Reflection.Emit;
 using System.Collections.Generic;
 using System.Linq;
 using Transitional;
-using System.Linq.Expressions;
 
 namespace NativeImport
 {
@@ -47,7 +45,7 @@ namespace NativeImport
         IntPtr GetProcAddress(IntPtr lib, string entryPoint);
         void FreeLibrary(IntPtr lib);
         string Translate(string name, string suffix = "");
-        object GetDelegate(IntPtr lib, string entryPoint, Type delegateType);
+        TDelegate GetDelegate<TDelegate>(IntPtr lib, string entryPoint) where TDelegate : class;
     }
 
     public static class Importers
@@ -58,13 +56,12 @@ namespace NativeImport
         public static INativeLibImporter Windows => WindowsShared.Value;
         public static INativeLibImporter Posix => PosixShared.Value;
 
-        static object GetDelegate(INativeLibImporter importer, IntPtr lib, string entryPoint, Type delegateType)
+        static TDelegate GetDelegate<TDelegate>(INativeLibImporter importer, IntPtr lib, string entryPoint) where TDelegate : class
         {
             IntPtr procAddress = importer.GetProcAddress(lib, entryPoint);
             if (procAddress == IntPtr.Zero)
                 return null;
-            var method = typeof(CurrentFramework).GetTypeInfo().GetMethod(nameof(CurrentFramework.GetDelegateForFunctionPointer)).MakeGenericMethod(delegateType);
-            return method.Invoke(null, new object[] { procAddress });
+            return CurrentFramework.GetDelegateForFunctionPointer<TDelegate>(procAddress);
         }
 
         private class WindowsImporter : INativeLibImporter
@@ -92,8 +89,8 @@ namespace NativeImport
                 return address;
             }
 
-            public object GetDelegate(IntPtr lib, string entryPoint, Type delegateType)
-                => Importers.GetDelegate(this, lib, entryPoint, delegateType);
+            public TDelegate GetDelegate<TDelegate>(IntPtr lib, string entryPoint) where TDelegate : class
+                => Importers.GetDelegate<TDelegate>(this, lib, entryPoint);
 
             public void FreeLibrary(IntPtr lib)
             {
@@ -224,8 +221,8 @@ namespace NativeImport
                 return address;
             }
 
-            public object GetDelegate(IntPtr lib, string entryPoint, Type delegateType)
-                => Importers.GetDelegate(this, lib, entryPoint, delegateType);
+            public TDelegate GetDelegate<TDelegate>(IntPtr lib, string entryPoint) where TDelegate : class
+                => Importers.GetDelegate<TDelegate>(this, lib, entryPoint);
 
             public void FreeLibrary(IntPtr lib)
             {
@@ -286,146 +283,28 @@ namespace NativeImport
 
         public static T Import<T>(INativeLibImporter importer, string libName, string version, bool suppressUnload) where T : class
         {
+            if (typeof(T) == typeof(RocksDbSharp.Native))
+            {
+                return (T)(object)ImportRocksDbNative(importer, libName, version, suppressUnload);
+            }
+
+            throw new PlatformNotSupportedException($"Type {typeof(T).FullName} is not supported by this importer. Only RocksDbSharp.Native is supported.");
+        }
+
+        private static RocksDbSharp.Native ImportRocksDbNative(INativeLibImporter importer, string libName, string version, bool suppressUnload)
+        {
+            return ImportFromSearchPaths(
+                importer,
+                libName,
+                version,
+                lib => new RocksDbSharp.NativeStaticImport(importer, lib, suppressUnload)
+            );
+        }
+
+        private static T ImportFromSearchPaths<T>(INativeLibImporter importer, string libName, string version, Func<IntPtr, T> construct) where T : class
+        {
             var subdir = GetArchName(RuntimeInformation.ProcessArchitecture);
             var runtimeId = GetRuntimeId(RuntimeInformation.ProcessArchitecture);
-
-            var assemblyName = new AssemblyName("DynamicLink");
-            var assemblyBuilder = CurrentFramework.DefineDynamicAssembly(assemblyName, System.Reflection.Emit.AssemblyBuilderAccess.Run);
-            var moduleBuilder = assemblyBuilder.DefineDynamicModule("DynLinkModule");
-            string typeName = typeof(T).Name + "_impl";
-            var typeBuilder = moduleBuilder.DefineType(typeName, TypeAttributes.Public | TypeAttributes.Class | TypeAttributes.AutoClass | TypeAttributes.AnsiClass | TypeAttributes.BeforeFieldInit | TypeAttributes.AutoLayout, typeof(T));
-
-            FieldBuilder field_importer = typeBuilder.DefineField("importer", typeof(INativeLibImporter), FieldAttributes.Private | FieldAttributes.InitOnly);
-            FieldBuilder field_libraryHandle = typeBuilder.DefineField("libraryHandle", typeof(IntPtr), FieldAttributes.Private | FieldAttributes.InitOnly);
-
-            var methods = typeof(T).GetTypeInfo().GetMethods(BindingFlags.Public | BindingFlags.Instance).Where(m => m.IsAbstract && !m.IsGenericMethod).ToArray();
-
-            // Define delegate types for each of the method signatures
-            var delegateMap = new Dictionary<string, Type>();
-            foreach (var method in methods)
-            {
-                var sig = GetMethodSig(method);
-                if (delegateMap.ContainsKey(sig))
-                    continue;
-                var delegateTypeInfo = CreateDelegateType(moduleBuilder, method);
-                delegateMap.Add(sig, delegateTypeInfo.AsType());
-            }
-
-            // Define one field for each method to hold a delegate
-            var delegates = methods.Select(m => new {
-                MethodInfo = m,
-                DelegateType = delegateMap[GetMethodSig(m)],
-            }).ToArray();
-            var delegateFields = delegates.Select((d, i) => typeBuilder.DefineField($"{d.MethodInfo.Name}_func_{i}", d.DelegateType, FieldAttributes.Private)).ToArray();
-
-            // Create the constructor which will initialize the importer and library handle
-            // and also use the importer to populate each of the delegate fields
-            ConstructorBuilder constructor = typeBuilder.DefineConstructor(MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName, CallingConventions.Standard, new Type[] { typeof(INativeLibImporter), typeof(IntPtr) });
-
-            {
-                var baseConstructor = typeof(T).GetTypeInfo().GetConstructors().First(con => con.GetParameters().Length == 0);
-                ILGenerator il = constructor.GetILGenerator();
-
-                // Call base constructor
-                il.Emit(OpCodes.Ldarg_0); // this
-                il.Emit(OpCodes.Call, baseConstructor);
-
-                // Store importer field
-                il.Emit(OpCodes.Ldarg_0); // this
-                il.Emit(OpCodes.Ldarg_1); // importer
-                il.Emit(OpCodes.Stfld, field_importer);
-
-                // Load and store library handle
-                il.Emit(OpCodes.Ldarg_0); // this
-                il.Emit(OpCodes.Ldarg_2); // library handle
-                il.Emit(OpCodes.Stfld, field_libraryHandle);
-
-                var getDelegateMethod = typeof(INativeLibImporter).GetTypeInfo().GetMethod("GetDelegate");
-                // Initialize each delegate field
-                for (int i = 0; i < delegateFields.Length; i++)
-                {
-                    var delegateType = delegates[i].DelegateType;
-
-                    il.Emit(OpCodes.Ldarg_0); // this
-
-                    il.Emit(OpCodes.Ldarg_1); // importer
-                    il.Emit(OpCodes.Ldarg_0); // this
-                    il.Emit(OpCodes.Ldfld, field_libraryHandle);
-                    il.Emit(OpCodes.Ldstr, delegates[i].MethodInfo.Name); // use method name from original class as entry point
-                    il.Emit(OpCodes.Ldtoken, delegateType); // the delegate type
-                    il.Emit(OpCodes.Call, typeof(System.Type).GetTypeInfo().GetMethod("GetTypeFromHandle")); // typeof()
-                    il.Emit(OpCodes.Callvirt, getDelegateMethod); // importer.GetDelegate()
-                    il.Emit(OpCodes.Isinst, delegateType); // as <delegate type>
-                    il.Emit(OpCodes.Stfld, delegateFields[i]);
-                }
-
-                // End of constructor
-                il.Emit(OpCodes.Ret);
-            }
-
-            // Create destructor
-            var destructor = typeBuilder.DefineMethod("Finalize", MethodAttributes.Family | MethodAttributes.Virtual | MethodAttributes.HideBySig);
-            {
-                var baseDestructor = typeof(T).GetTypeInfo().GetMethod("Finalize", BindingFlags.NonPublic | BindingFlags.Instance);
-                var il = destructor.GetILGenerator();
-                var end = il.DefineLabel();
-
-                il.BeginExceptionBlock();
-                if (!suppressUnload)
-                {
-                    il.Emit(OpCodes.Ldarg_0); // this
-                    il.Emit(OpCodes.Ldfld, field_importer); // .importer
-                    il.Emit(OpCodes.Ldarg_0); // this
-                    il.Emit(OpCodes.Ldfld, field_libraryHandle); // .libraryHandle
-                    il.Emit(OpCodes.Callvirt, typeof(INativeLibImporter).GetTypeInfo().GetMethod("FreeLibrary")); // INativeLibImporter::FreeLibrary()
-                }
-                //il.Emit(OpCodes.Leave, end);
-                il.BeginFinallyBlock();
-                il.Emit(OpCodes.Ldarg_0); // this
-                il.Emit(OpCodes.Call, baseDestructor); // object::Finalize()
-                //il.Emit(OpCodes.Endfinally);
-                il.EndExceptionBlock();
-                il.MarkLabel(end);
-                il.Emit(OpCodes.Ret);
-            }
-
-            var nativeFunctionMissingExceptionConstructor = typeof(NativeFunctionMissingException).GetTypeInfo().GetConstructor(new[] { typeof(string) });
-            // Now override each method from the base class
-            for (int i = 0; i < delegateFields.Length; i++)
-            {
-                var baseMethod = delegates[i].MethodInfo;
-                var args = baseMethod.GetParameters();
-                var omethod = typeBuilder.DefineMethod(
-                    baseMethod.Name,
-                    (baseMethod.Attributes & ~(MethodAttributes.Abstract | MethodAttributes.NewSlot)) | MethodAttributes.Virtual,
-                    baseMethod.CallingConvention,
-                    baseMethod.ReturnType,
-                    args.Select(arg => arg.ParameterType).ToArray()
-                );
-                var il = omethod.GetILGenerator();
-                il.Emit(OpCodes.Ldarg_0); // this
-                il.Emit(OpCodes.Ldfld, delegateFields[i]); // {field}
-                il.Emit(OpCodes.Dup);
-                var error = il.DefineLabel();
-                il.Emit(OpCodes.Brfalse_S, error);
-                if (args.Length >= 1)
-                    il.Emit(OpCodes.Ldarg_1);
-                if (args.Length >= 2)
-                    il.Emit(OpCodes.Ldarg_2);
-                if (args.Length >= 3)
-                    il.Emit(OpCodes.Ldarg_3);
-                for (short argNum = 4; argNum <= args.Length; argNum++)
-                    il.Emit(OpCodes.Ldarg_S, argNum);
-                il.Emit(OpCodes.Tailcall);
-                il.Emit(OpCodes.Callvirt, delegates[i].DelegateType.GetTypeInfo().GetMethod("Invoke"));
-                il.Emit(OpCodes.Ret);
-                il.MarkLabel(error);
-                il.Emit(OpCodes.Ldstr, baseMethod.ToString());
-                il.Emit(OpCodes.Newobj, nativeFunctionMissingExceptionConstructor);
-                il.Emit(OpCodes.Throw);
-            }
-
-            var type = typeBuilder.CreateTypeInfo();
 
             var versionParts = version.Split('.');
             var names = versionParts.Select((p, i) => libName + "-" + string.Join(".", versionParts.Take(i + 1)))
@@ -449,8 +328,10 @@ namespace NativeImport
             try { basePaths.Add(Directory.GetCurrentDirectory()); } catch { /* Ignore */ }
             try { basePaths.Add(Path.GetDirectoryName(UriToPath(AppContext.BaseDirectory))); } catch { /* Ignore */ }
             try { basePaths.Add(Path.GetDirectoryName(UriToPath(Transitional.CurrentFramework.GetBaseDirectory()))); } catch { /* Ignore */ }
+#if !NET8_0_OR_GREATER
             try { basePaths.Add(Path.GetDirectoryName(Assembly.GetEntryAssembly()?.Location)); } catch { /* Ignore */ }
             try { basePaths.Add(Path.GetDirectoryName(typeof(PosixImporter).GetTypeInfo().Assembly.Location)); } catch { /* Ignore */ }
+#endif
 
             if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
             {
@@ -483,7 +364,6 @@ namespace NativeImport
 
             foreach (var spec in search)
             {
-                var construct = type.GetConstructor(new Type[] { typeof(INativeLibImporter), typeof(IntPtr) });
                 IntPtr lib = IntPtr.Zero;
                 try
                 {
@@ -502,12 +382,57 @@ namespace NativeImport
                     spec.Error = e;
                     continue;
                 }
-                var obj = construct.Invoke(new object[] { importer, lib });
-                var t = obj as T;
-                return t;
+
+                try
+                {
+                    var t = construct(lib);
+                    if (t is null)
+                    {
+                        throw new NativeLoadException($"Loader returned null for type {typeof(T).FullName}", null);
+                    }
+                    return t;
+                }
+                catch (TargetInvocationException tie)
+                {
+                    spec.Error = tie.InnerException ?? tie;
+                    TryFreeLibrary(importer, lib);
+                    continue;
+                }
+                catch (Exception e)
+                {
+                    spec.Error = e;
+                    TryFreeLibrary(importer, lib);
+                    continue;
+                }
             }
 
-            throw new NativeLoadException("Unable to locate rocksdb native library, either install it, or use RocksDbNative nuget package\nSearched:\n" + string.Join("\n", search.Select(s => $"{s.Path}: ({s.Error.GetType().Name}) {s.Error.Message}")), null);
+            throw new NativeLoadException("Unable to locate rocksdb native library, either install it, or use RocksDbNative nuget package\nSearched:\n" + string.Join("\n", search.Select(FormatSearchError)), null);
+        }
+
+        private static string FormatSearchError(SearchPath searchPath)
+        {
+            var error = searchPath.Error;
+            if (error is null)
+            {
+                return $"{searchPath.Path}: (UnknownError) Unknown";
+            }
+            return $"{searchPath.Path}: ({error.GetType().Name}) {error.Message}";
+        }
+
+        private static void TryFreeLibrary(INativeLibImporter importer, IntPtr lib)
+        {
+            if (lib == IntPtr.Zero)
+            {
+                return;
+            }
+
+            try
+            {
+                importer.FreeLibrary(lib);
+            }
+            catch
+            {
+            }
         }
 
         private static string UriToPath(string uriString)
@@ -522,25 +447,6 @@ namespace NativeImport
         {
             public string Path { get; set; }
             public Exception Error { get; set; }
-        }
-
-        private static string GetMethodSig(MethodInfo m)
-        {
-            return string.Join("_", Enumerable.Repeat(m.ReturnType.Name, 1).Concat(m.GetParameters().Select(p => p.ParameterType.Name)));
-        }
-
-        private static TypeInfo CreateDelegateType(ModuleBuilder moduleBuilder, MethodInfo methodTemplate)
-        {
-            var sig = GetMethodSig(methodTemplate);
-            var typeBuilder = moduleBuilder.DefineType(sig, TypeAttributes.Class | TypeAttributes.Public | TypeAttributes.AutoClass | TypeAttributes.AnsiClass | TypeAttributes.Sealed, typeof(System.MulticastDelegate));
-            var constructor = typeBuilder.DefineConstructor(MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName, CallingConventions.Standard, new Type[] { typeof(object), typeof(IntPtr) });
-            constructor.SetImplementationFlags(MethodImplAttributes.Runtime | MethodImplAttributes.Managed);
-
-            var parameters = methodTemplate.GetParameters().Select(pi => pi.ParameterType).ToArray();
-            var methodBuilder = typeBuilder.DefineMethod("Invoke", MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.NewSlot | MethodAttributes.Virtual, methodTemplate.ReturnType, parameters);
-            methodBuilder.SetImplementationFlags(MethodImplAttributes.Runtime | MethodImplAttributes.Managed);
-
-            return typeBuilder.CreateTypeInfo();
         }
 
     }
@@ -566,4 +472,3 @@ namespace NativeImport
         }
     }
 }
-

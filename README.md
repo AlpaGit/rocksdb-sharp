@@ -46,4 +46,19 @@ The version of the NuGet package is set to follow the official RocksDB version, 
 
 This will install the managed library and the correct version of the unmanaged library depending on your operating system. The native64-bit library is automatically built for each official RocksDB release, for Windows, Linux and MacOS, and is included in the package by default.
 
+### Native AOT Runtime Smoke Test
+
+On Windows, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File Tests/AotRuntimeSmokeTest/run-aot-runtime-smoke.ps1
+```
+
+This command publishes `Tests/AotRuntimeSmokeTest` with `PublishAot=true` and executes the native binary.
+If the repo's `csharp/runtimes/win-x64/native/rocksdb.dll` is a stub, the script can use a valid DLL from the local NuGet cache.
+You can also provide an explicit DLL path:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File Tests/AotRuntimeSmokeTest/run-aot-runtime-smoke.ps1 -NativeWindowsDllPath "C:\path\to\rocksdb.dll"
+```
 

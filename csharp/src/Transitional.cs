@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Reflection;
-using System.Reflection.Emit;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -16,9 +15,6 @@ namespace Transitional
 {
     internal static class CurrentFramework
     {
-        public static AssemblyBuilder DefineDynamicAssembly(AssemblyName name, AssemblyBuilderAccess access)
-            => AssemblyBuilder.DefineDynamicAssembly(name, access);
-
         public static unsafe string CreateString(sbyte* value, int startIndex, int length, System.Text.Encoding enc)
             => new string(value, startIndex, length, enc);
 
